@@ -1,0 +1,211 @@
+name: devenv
+
+services:
+  gitea:
+    image: gitea/gitea:latest
+    hostname: gitea
+    networks:
+      - devenv
+    volumes:
+      - ./gitea:/data
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    ports:
+      - 8000:8000
+    environment:
+      - USER_UID=1000
+      - USER_GID=1000
+      - GITEA_CUSTOM=/data/gitea
+      - GITEA__server__HTTP_PORT=8000
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fSs", "http://localhost:8000/api/healthz"]
+      start_period: 10s
+      interval: 5s
+      timeout: 10s
+      retries: 3
+
+  coder:
+    profiles:
+      - coder
+      - full
+    image: ghcr.io/coder/coder:latest
+    hostname: coder
+    networks:
+      - devenv
+    volumes:
+      - ./coder:/home/coder/.config
+      - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      - 3000:3000
+    group_add:
+      - 998
+    environment:
+      - CODER_ACCESS_URL=http://coder:3000
+      - CODER_HTTP_ADDRESS=0.0.0.0:3000
+      - CODER_WILDCARD_ACCESS_URL=*.apps.coder:3000
+      # OIDC
+      - CODER_OIDC_IGNORE_EMAIL_VERIFIED=true
+      - CODER_OIDC_EMAIL_DOMAIN=example.com,gmail.com
+      - CODER_OIDC_ISSUER_URL=http://gitea:8000/
+      - CODER_OIDC_CLIENT_ID=${DE_CODER_CLIENT_ID}
+      - CODER_OIDC_CLIENT_SECRET=${DE_CODER_CLIENT_SECRET}
+      # GITAUTH
+      - CODER_GITAUTH_0_TYPE=github
+      - CODER_GITAUTH_0_ID=gitea
+      - CODER_GITAUTH_0_REGEX=gitea:8000
+      - CODER_GITAUTH_0_AUTH_URL=http://gitea:8000/login/oauth/authorize
+      - CODER_GITAUTH_0_TOKEN_URL=http://gitea:8000/login/oauth/access_token
+      - CODER_GITAUTH_0_VALIDATE_URL=http://gitea:8000/login/oauth/userinfo
+      - CODER_GITAUTH_0_CLIENT_ID=${DE_CODER_CLIENT_ID}
+      - CODER_GITAUTH_0_CLIENT_SECRET=${DE_CODER_CLIENT_SECRET}
+    restart: unless-stopped
+    depends_on:
+      gitea:
+        condition: service_healthy
+
+  act:
+    profiles:
+      - act
+      - full
+    image: gitea/act_runner:latest
+    hostname: act
+    networks:
+      - devenv
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./act/config.yaml:/config.yaml
+      - ./act/data:/data
+    environment:
+      - CONFIG_FILE=/config.yaml
+      - GITEA_INSTANCE_URL=http://gitea:8000
+      - GITEA_RUNNER_REGISTRATION_TOKEN=${DE_GITEA_RUNNER_TOKEN}
+      - GITEA_RUNNER_NAME=runner1
+    restart: unless-stopped
+    depends_on:
+      gitea:
+        condition: service_healthy
+
+  opengist:
+    profiles:
+      - opengist
+      - full
+    image: ghcr.io/thomiceli/opengist:latest
+    hostname: opengist
+    networks:
+      - devenv
+    volumes:
+      - ./opengist:/opengist
+    ports:
+      - 6157:6157
+    environment:
+      - OG_GITEA_CLIENT_KEY=${DE_OPENGIST_CLIENT_KEY}
+      - OG_GITEA_SECRET=${DE_OPENGIST_SECRET}
+      - OG_GITEA_URL=http://gitea:8000
+    restart: unless-stopped
+    depends_on:
+      gitea:
+        condition: service_healthy
+
+  codeberg:
+    profiles:
+      - pages
+      - full
+    image: codeberg.org/codeberg/pages-server:next
+    hostname: codeberg
+    networks:
+      - devenv
+    ports:
+      - 8443:8443
+    environment:
+      - ACME_ACCEPT_TERMS=true
+      - ACME_API=https://acme.mock.directory
+      - GITEA_ROOT=http://gitea:8000
+      - GITEA_API_TOKEN=${CB_GITEA_API_TOKEN}
+      - PAGES_DOMAIN=codeberg
+      - PORT=8443
+      - LOG_LEVEL=debug
+    restart: unless-stopped
+    depends_on:
+      gitea:
+        condition: service_healthy
+
+
+  sonarqube:
+    profiles:
+      - sonar
+      - full
+    image: sonarqube:community
+    hostname: sonarqube
+    networks:
+      - devenv
+    depends_on:
+      - sqdb
+    volumes:
+      - ./sonarqube/data:/opt/sonarqube/data
+      - ./sonarqube/extensions:/opt/sonarqube/extensions
+      - ./sonarqube/logs:/opt/sonarqube/logs
+    ports:
+      - "9000:9000"
+    environment:
+      SONAR_JDBC_URL: jdbc:postgresql://sqdb:5432/sonar
+      SONAR_JDBC_USERNAME: sonar
+      SONAR_JDBC_PASSWORD: ${SQDB_PASS}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/api/system/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  sqdb:
+    profiles:
+      - sonar
+      - full
+    image: postgres:12
+    hostname: sqdb
+    networks:
+      - devenv
+    volumes:
+      - ./sonarqube/pg:/var/lib/postgresql
+      - ./sonarqube/pgdata:/var/lib/postgresql/data
+    environment:
+      POSTGRES_USER: sonar
+      POSTGRES_PASSWORD: ${SQDB_PASS}
+    restart: unless-stopped
+
+  proxpi:
+    profiles:
+      - proxpi
+      - full
+    image: epicwink/proxpi:latest
+    hostname: proxpi
+    networks:
+      - devenv
+    volumes:
+      - ./proxpi:/var/cache/proxpi
+    ports:
+      - 5050:5050
+    environment:
+      - PROXPI_CACHE_DIR=/var/cache/proxpi
+    command: "--bind 0.0.0.0:5050 --threads 2"
+    restart: unless-stopped
+
+  registry:
+    profiles:
+      - registry
+      - full
+    image: registry
+    hostname: registry
+    networks:
+      - devenv
+    volumes:
+      - ./registry/config.yml:/etc/docker/registry/config.yml
+      - ./registry/data:/var/lib/registry
+    ports:
+      - 5000:5000
+    restart: unless-stopped
+
+networks:
+  devenv: {}
